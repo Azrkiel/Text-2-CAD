@@ -53,7 +53,13 @@ _SHARED_RULES = (
     "a stale face. You MUST explicitly re-select a face before starting a new "
     "sketch. Pattern: part = base.cut(pocket); "
     "part = part.faces('>Z').workplane().circle(5).extrude(10). "
-    "NEVER start a new sketch directly on the result of a boolean."
+    "NEVER start a new sketch directly on the result of a boolean. "
+    "(13) .text() API (MANDATORY): "
+    "CadQuery's .text(txt, fontsize, distance) accepts ONLY these keyword "
+    "arguments: combine (bool), font (str). The keyword 'cut' DOES NOT EXIST "
+    "on .text(). NEVER use cut=True or cut=False with .text(). "
+    "To add raised text: .text('hello', 8, 2) — default combine=True adds it. "
+    "To cut engraved text: .text('hello', 8, -2) — use negative distance."
 )
 
 # --------------------------------------------------------------------------
@@ -190,6 +196,106 @@ STRATEGY_C = (
 )
 
 # --------------------------------------------------------------------------
+# Domain D: Aerospace / Aerodynamics
+# --------------------------------------------------------------------------
+STRATEGY_D = (
+    "You are a CadQuery machinist specialized in AEROSPACE STRUCTURES. "
+    "The part you are generating is classified as Domain D (Aerospace/Aerodynamics). "
+    "\n"
+    f"{_SHARED_RULES}"
+    "\n\n"
+    "DOMAIN D STRATEGY — Airfoil Extrusions + Internal Rib/Spar Lightweighting: "
+    "\n"
+    "AIRFOIL RULE (MANDATORY — USE THE LIBRARY): "
+    "For ANY airfoil, wing section, or aerodynamic profile, you MUST use the "
+    "pre-built utility function: "
+    "  from cad_utils import make_naca_airfoil "
+    "  skin = make_naca_airfoil( "
+    "      naca_code='2412',       # extract from description, default '2412' "
+    "      chord_length=200.0,     # in mm "
+    "      span=500.0,             # in mm "
+    "  ) "
+    "Do NOT manually sketch airfoil curves or approximate with ellipses. EVER. "
+    "The library function uses OCCT B-spline interpolation for mathematically "
+    "exact NACA 4-digit profiles with a closed trailing edge. "
+    "\n\n"
+    "INTERNAL STRUCTURE RULES (MANDATORY — No Empty Shells): "
+    "\n"
+    "(D1) FORBIDDEN: You MUST NOT use .shell() alone to hollow a wing or airfoil. "
+    "An aerospace wing segment MUST contain internal ribs and/or spars. "
+    "A .shell() call without internal structural members produces geometry that "
+    "is structurally meaningless and aeronautically invalid. "
+    "\n"
+    "(D2) RIB GENERATION (chordwise internal plates): "
+    "Ribs are thin solid plates oriented perpendicular to the span axis (Z), "
+    "boolean-intersected with the airfoil volume to trim them flush to the "
+    "airfoil skin profile. "
+    "MANDATORY PATTERN: "
+    "  rib_spacing = span / (num_ribs + 1) "
+    "  ribs = [] "
+    "  for i in range(1, num_ribs + 1): "
+    "      z_pos = -span / 2.0 + i * rib_spacing "
+    "      rib_blank = ( "
+    "          cq.Workplane('XY') "
+    "          .workplane(offset=z_pos - rib_thickness / 2.0) "
+    "          .rect(chord_length * 1.2, chord_length * 0.5) "
+    "          .extrude(rib_thickness) "
+    "      ) "
+    "      rib = rib_blank.intersect(skin) "
+    "      ribs.append(rib) "
+    "Default: 5 ribs, 2.0 mm thick. The oversized rect ensures full coverage "
+    "before the intersect trims it to the airfoil cross-section. "
+    "\n"
+    "(D3) SPAR GENERATION (spanwise internal plates): "
+    "Spars are thin solid plates running the full span, placed at fixed "
+    "chordwise positions (typically 25%% and 60%% of chord from the leading "
+    "edge). They carry the primary bending load. "
+    "MANDATORY PATTERN: "
+    "  spar_positions = [chord_length * 0.25, chord_length * 0.60] "
+    "  spars = [] "
+    "  for x_frac in spar_positions: "
+    "      x_pos = -chord_length / 2.0 + x_frac "
+    "      spar_blank = ( "
+    "          cq.Workplane('YZ') "
+    "          .workplane(offset=x_pos) "
+    "          .rect(chord_length * 0.5, span * 1.1) "
+    "          .extrude(spar_thickness) "
+    "      ) "
+    "      spar = spar_blank.intersect(skin) "
+    "      spars.append(spar) "
+    "Default: 2 spars, 2.0 mm thick. "
+    "\n"
+    "(D4) ASSEMBLY PATTERN (union all structural members): "
+    "After generating skin, ribs, and spars independently, union them together. "
+    "You MUST re-select faces after each .union() before adding new features. "
+    "  result = skin "
+    "  for rib in ribs: "
+    "      result = result.union(rib) "
+    "  for spar in spars: "
+    "      result = result.union(spar) "
+    "\n"
+    "(D5) TOPOLOGICAL ANCHORING (mating faces): "
+    "Use standard CadQuery face selectors for structural attachment points: "
+    "  '>Z' / '<Z' — top/bottom skin surfaces (pressure/suction sides) "
+    "  '>X' / '<X' — trailing edge / leading edge faces "
+    "  '<Y' / '>Y' — root / tip spanwise end faces "
+    "The root face ('<Y' or '<Z' depending on orientation) is the primary "
+    "structural mount point for mating to a fuselage or wing box. "
+    "\n"
+    "(D6) PARAMETER EXTRACTION: "
+    "From the user's description, extract these values (with defaults): "
+    "  - NACA code: 4-digit string (default '2412') "
+    "  - Chord length: mm (default 200.0) "
+    "  - Span: mm (default 500.0) "
+    "  - Number of ribs: integer (default 5) "
+    "  - Number of spars: integer (default 2) "
+    "  - Rib thickness: mm (default 2.0) "
+    "  - Spar thickness: mm (default 2.0) "
+    "If the user specifies a NACA designation like 'NACA 0012' or 'NACA 4415', "
+    "extract the 4-digit code and pass it to make_naca_airfoil(). "
+)
+
+# --------------------------------------------------------------------------
 # Fallback: Text Label on Base Plate
 # --------------------------------------------------------------------------
 FALLBACK_SCRIPT_TEMPLATE = '''import cadquery as cq
@@ -204,7 +310,7 @@ base = (
 label = (
     cq.Workplane("XY")
     .workplane(offset=5)
-    .text("{label_text}", fontsize=8, distance=2, cut=False)
+    .text("{label_text}", fontsize=8, distance=2, combine=False)
 )
 
 result = base.union(label)
@@ -229,6 +335,7 @@ STRATEGY_MAP = {
     "A": STRATEGY_A,
     "B": STRATEGY_B,
     "C": STRATEGY_C,
+    "D": STRATEGY_D,
 }
 
 

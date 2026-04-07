@@ -7,9 +7,10 @@ Gemini call that runs before the Machinist to prevent blind primitive-only
 generation.
 
 Domains:
-  A (Primitives/Structural) — boxes, plates, brackets, enclosures
-  B (Mechanical/Parametric) — gears, bearings, threads, cams, springs
-  C (Organic/Ergonomic)     — handles, shells, fairings, grips, spoons
+  A (Primitives/Structural)    — boxes, plates, brackets, enclosures
+  B (Mechanical/Parametric)    — gears, bearings, threads, cams, springs
+  C (Organic/Ergonomic)        — handles, shells, fairings, grips, spoons
+  D (Aerospace/Aerodynamics)   — wings, airfoils, NACA profiles, ribs, spars
 """
 
 import google.generativeai as genai
@@ -22,12 +23,14 @@ _CLASSIFICATION_SCHEMA = {
     "properties": {
         "domain": {
             "type": "string",
-            "enum": ["A", "B", "C"],
+            "enum": ["A", "B", "C", "D"],
             "description": (
                 "The geometric domain: "
                 "'A' for primitives/structural (boxes, plates, enclosures, brackets, frames). "
                 "'B' for mechanical/parametric (gears, bearings, threads, cams, pulleys, springs, fasteners). "
-                "'C' for organic/ergonomic (handles, mouse shells, fairings, grips, bottles, spoons, helmets)."
+                "'C' for organic/ergonomic (handles, mouse shells, grips, bottles, spoons, helmets). "
+                "'D' for aerospace/aerodynamics (wings, airfoils, NACA profiles, ribs, spars, "
+                "camber, leading edge, trailing edge, wing segments, aerostructures)."
             ),
         },
         "reasoning": {
@@ -56,7 +59,7 @@ async def classify_part(description: str) -> dict:
         description: The part's physical description from PartDefinition.
 
     Returns:
-        {"domain": "A"|"B"|"C", "reasoning": str, "key_params": str}
+        {"domain": "A"|"B"|"C"|"D", "reasoning": str, "key_params": str}
     """
     model = genai.GenerativeModel(
         model_name=MODEL,
@@ -77,10 +80,23 @@ async def classify_part(description: str) -> dict:
             "\n"
             "Domain C (Organic/Ergonomic): Parts with smooth, flowing surfaces that "
             "cannot be made with simple extrusions. Examples: ergonomic handles, "
-            "mouse shells, aerodynamic fairings, bottle shapes, helmet visors, "
+            "mouse shells, bottle shapes, helmet visors, "
             "phone cases with contoured backs, joystick grips. "
-            "Key signal: described by curves, comfort, aerodynamics, organic shapes, "
+            "Key signal: described by curves, comfort, organic shapes, "
             "or cross-sectional profiles that vary along an axis. "
+            "\n"
+            "Domain D (Aerospace/Aerodynamics): Wing sections, airfoil profiles, and "
+            "aerostructural components with internal reinforcement. Examples: NACA airfoil "
+            "extrusions, wing segments with ribs/spars, aerodynamic control surfaces, "
+            "stabilizer fins, turbine blade blanks, leading/trailing edge assemblies. "
+            "Key signal: mentions 'wing', 'airfoil', 'NACA', 'camber', 'chord', 'span', "
+            "'ribs', 'spars', 'leading edge', 'trailing edge', 'aerofoil', or any "
+            "standard airfoil designation (e.g., '2412', '0012', '4415'). "
+            "\n"
+            "PRIORITY: Domain D takes precedence over ALL other domains when aerospace "
+            "keywords are present. A 'wing rib' is Domain D, NOT Domain A. An 'airfoil "
+            "fairing' is Domain D, NOT Domain C. A 'turbine blade blank' is Domain D, "
+            "NOT Domain B. "
             "\n"
             "When in doubt between A and B, choose B (parametric is safer than primitive). "
             "When in doubt between A and C, choose A (structural is more reliable). "

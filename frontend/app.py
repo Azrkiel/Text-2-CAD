@@ -10,6 +10,7 @@ import json
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_ace import st_ace
 
 st.set_page_config(page_title="Text-to-CAD", page_icon="\U0001f529", layout="wide")
 
@@ -30,7 +31,7 @@ STEP_LABELS = {
 }
 
 # ── Session State ───────────────────────────────────────────
-for key, default in [("script_code", ""), ("glb_bytes", None), ("status", "Ready")]:
+for key, default in [("script_code", ""), ("glb_bytes", None), ("status", "Ready"), ("script_version", 0)]:
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -138,6 +139,8 @@ def stream_pipeline(prompt: str, progress_ph) -> None:
 
     st.session_state.script_code = script_code
     st.session_state.glb_bytes = glb_bytes
+    if script_code:
+        st.session_state.script_version += 1
 
     has_error = any(s["status"] == "error" for s in steps)
     if has_error:
@@ -213,13 +216,16 @@ with col_label:
 with col_run:
     run_clicked = st.button("Run (Ctrl+Enter)")
 
-# 6) Code display with line numbers (always visible)
-with st.container(height=400):
-    st.code(
-        st.session_state.script_code or "",
-        language="python",
-        line_numbers=True,
-    )
+# 6) Editable code editor (always visible)
+edited_code = st_ace(
+    value=st.session_state.script_code or "",
+    language="python",
+    theme="monokai",
+    height=400,
+    key=f"ace_editor_{st.session_state.script_version}",
+    auto_update=True,
+)
+st.session_state.script_code = edited_code
 
 if run_clicked and st.session_state.script_code:
     run_script(st.session_state.script_code)

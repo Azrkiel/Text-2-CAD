@@ -167,3 +167,186 @@ def make_involute_spur_gear(
         )
 
     return result
+
+
+def make_naca_airfoil(
+    naca_code: str = "2412",
+    chord_length: float = 200.0,
+    span: float = 500.0,
+) -> cq.Workplane:
+    """Generate a NACA 4-digit airfoil as an extruded 3D solid (B-Rep volume).
+
+    Parses the standard 4-digit NACA designation and computes upper/lower
+    surface coordinates from the analytic thickness and camber distributions.
+    The profile is built as two B-spline edges (upper and lower surfaces)
+    via OpenCASCADE's Geom_BSplineCurve interpolation, assembled into a
+    closed wire, and extruded linearly along the span axis.
+
+    NACA 4-digit encoding:
+        - Digit 1: max camber as percent of chord  (m = d1 / 100)
+        - Digit 2: max camber location in tenths   (p = d2 / 10)
+        - Digits 3-4: max thickness as percent      (t = d34 / 100)
+
+    Coordinate system:
+        - X axis: chordwise (leading edge at -chord/2, trailing edge at +chord/2)
+        - Y axis: thickness direction
+        - Z axis: spanwise (centered at origin)
+
+    Uses the modified thickness coefficient (-0.1036 for x^4 term) to produce
+    a closed trailing edge (zero TE thickness), ensuring the profile wire is
+    watertight without requiring a separate closing edge.
+
+    Args:
+        naca_code: 4-digit NACA designation string (e.g., "2412", "0012").
+        chord_length: Chord length in mm.
+        span: Spanwise extrusion length in mm.
+
+    Returns:
+        cq.Workplane containing the extruded 3D airfoil solid, centered
+        at the origin.
+
+    Raises:
+        ValueError: If naca_code is not exactly 4 digits, or if the result
+                    is not a manifold cq.Solid.
+    """
+    if len(naca_code) != 4 or not naca_code.isdigit():
+        raise ValueError(
+            f"Invalid NACA code '{naca_code}': must be exactly 4 digits "
+            f"(e.g., '2412', '0012')."
+        )
+
+    m = int(naca_code[0]) / 100.0   # max camber
+    p = int(naca_code[1]) / 10.0    # max camber position
+    t = int(naca_code[2:4]) / 100.0  # max thickness ratio
+
+    # ── Compute surface coordinates ────────────────────────────────
+    # Cosine spacing concentrates points near the leading edge where
+    # curvature is highest, improving spline fidelity.
+    n_pts = 80
+    upper_vecs: list[cq.Vector] = []
+    lower_vecs: list[cq.Vector] = []
+
+    for i in range(n_pts + 1):
+        beta = i * math.pi / n_pts
+        x = (1.0 - math.cos(beta)) / 2.0  # normalized [0, 1]
+
+        # Half-thickness distribution (modified form: closed trailing edge)
+        yt = (t / 0.20) * (
+            0.2969 * math.sqrt(x)
+            - 0.1260 * x
+            - 0.3516 * x * x
+            + 0.2843 * x * x * x
+            - 0.1036 * x * x * x * x
+        )
+
+        # Camber line and local slope
+        if m == 0.0 or p == 0.0:
+            # Symmetric airfoil — no camber
+            yc = 0.0
+            theta = 0.0
+        else:
+            if x < p:
+                yc = (m / (p * p)) * (2.0 * p * x - x * x)
+                dyc_dx = (2.0 * m / (p * p)) * (p - x)
+            else:
+                yc = (m / ((1.0 - p) ** 2)) * (
+                    (1.0 - 2.0 * p) + 2.0 * p * x - x * x
+                )
+                dyc_dx = (2.0 * m / ((1.0 - p) ** 2)) * (p - x)
+            theta = math.atan(dyc_dx)
+
+        # Upper and lower surface points (perpendicular to camber line)
+        sin_t = math.sin(theta)
+        cos_t = math.cos(theta)
+        upper_vecs.append(cq.Vector(
+            (x - yt * sin_t) * chord_length,
+            (yc + yt * cos_t) * chord_length,
+            0.0,
+        ))
+        lower_vecs.append(cq.Vector(
+            (x + yt * sin_t) * chord_length,
+            (yc - yt * cos_t) * chord_length,
+            0.0,
+        ))
+
+    # ── Build closed profile wire via OCCT B-spline interpolation ──
+    # Upper edge: trailing edge → leading edge (reversed point order)
+    # Lower edge: leading edge → trailing edge (natural order)
+    # The two edges share exact LE and TE endpoints (yt=0 at x=0 and x=1).
+    upper_edge = cq.Edge.makeSpline(list(reversed(upper_vecs)))
+    lower_edge = cq.Edge.makeSpline(lower_vecs)
+
+    profile_wire = cq.Wire.assembleEdges([upper_edge, lower_edge])
+
+    # ── Extrude along span (Z-axis) ───────────────────────────────
+    solid = cq.Solid.extrudeLinear(profile_wire, [], cq.Vector(0, 0, span))
+
+    # Center on origin (chord centered on X, span centered on Z)
+    result = cq.Workplane("XY").newObject([solid])
+    result = result.translate((-chord_length / 2.0, 0.0, -span / 2.0))
+
+    # ── Topological validation ─────────────────────────────────────
+    val = result.val()
+    if not isinstance(val, cq.Solid):
+        raise ValueError(
+            f"NACA airfoil validation failed: expected cq.Solid, "
+            f"got {type(val).__name__}."
+        )
+
+    return result
+
+
+def make_metric_thread(
+    diameter: float,
+    pitch: float,
+    length: float,
+) -> cq.Workplane:
+    """Generate a stable ribbed-cylinder approximation of a metric thread.
+
+    Per Domain B rules, a true 3D helical sweep crashes the BRep kernel.
+    Instead, this builds a cylindrical shaft with evenly spaced annular ribs
+    that approximate thread crests. The result is a manifold solid that
+    OpenCASCADE can reliably boolean-union or boolean-cut.
+
+    Args:
+        diameter: Nominal (major) thread diameter in mm.
+        pitch: Thread pitch in mm (distance between crests).
+        length: Total thread length in mm.
+
+    Returns:
+        cq.Workplane solid centered at the origin.
+    """
+    major_r = diameter / 2.0
+    minor_r = major_r - 0.6134 * pitch  # standard 60° thread depth
+    rib_height = major_r - minor_r
+    rib_width = pitch * 0.4
+
+    # Core cylinder at the minor diameter
+    result = cq.Workplane("XY").circle(minor_r).extrude(length)
+
+    # Stack annular ribs along the length to simulate thread crests
+    num_ribs = int(length / pitch)
+    for i in range(num_ribs):
+        z_offset = pitch * 0.5 + i * pitch
+        if z_offset + rib_width / 2.0 > length:
+            break
+        rib = (
+            cq.Workplane("XY")
+            .workplane(offset=z_offset - rib_width / 2.0)
+            .circle(major_r)
+            .circle(minor_r)
+            .extrude(rib_width)
+        )
+        result = result.union(rib)
+
+    # Center on origin
+    result = result.translate((0, 0, -length / 2.0))
+
+    solid = result.val()
+    if not isinstance(solid, cq.Solid):
+        raise ValueError(
+            f"Thread validation failed: expected cq.Solid, "
+            f"got {type(solid).__name__}."
+        )
+
+    return result

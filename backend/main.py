@@ -19,6 +19,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from agents import (
+    ScriptError,
     is_single_part,
     run_assembly_critic_loop,
     run_critic_loop,
@@ -81,6 +82,16 @@ async def _pipeline(prompt: str) -> AsyncGenerator[str, None]:
         yield _event(label, "running", "Manufacturing single part")
         try:
             code = await run_critic_loop(part)
+        except ScriptError as e:
+            yield _event(label, "error", str(e))
+            error_complete = {
+                "step": "complete",
+                "status": "error",
+                "message": str(e),
+                "script": e.script,
+            }
+            yield f"data: {json.dumps(error_complete)}\n\n"
+            return
         except RuntimeError as e:
             yield _event(label, "error", str(e))
             error_complete = {
@@ -134,6 +145,16 @@ async def _pipeline(prompt: str) -> AsyncGenerator[str, None]:
                 part_id, code = await coro
                 part_scripts[part_id] = code
                 yield _event(labels[part_id], "done", f"Part '{part_id}' validated")
+            except ScriptError as e:
+                yield _event("machinist", "error", str(e))
+                error_complete = {
+                    "step": "complete",
+                    "status": "error",
+                    "message": str(e),
+                    "script": e.script,
+                }
+                yield f"data: {json.dumps(error_complete)}\n\n"
+                return
             except RuntimeError as e:
                 yield _event("machinist", "error", str(e))
                 error_complete = {
@@ -150,6 +171,16 @@ async def _pipeline(prompt: str) -> AsyncGenerator[str, None]:
         try:
             final_script = await run_assembly_critic_loop(manifest, part_scripts)
             final_script = final_script.replace("output.glb", output_filename)
+        except ScriptError as e:
+            yield _event("assembler", "error", str(e))
+            error_complete = {
+                "step": "complete",
+                "status": "error",
+                "message": str(e),
+                "script": e.script,
+            }
+            yield f"data: {json.dumps(error_complete)}\n\n"
+            return
         except RuntimeError as e:
             yield _event("assembler", "error", str(e))
             error_complete = {

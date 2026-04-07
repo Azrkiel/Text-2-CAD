@@ -58,6 +58,11 @@ The following rules prevent the most common runtime crashes (topology errors, BR
 * **Problem:** Methods like `.fillet2D()` and `.chamfer2D()` do not exist in CadQuery. Using them raises `AttributeError`.
 * **Mandatory Pattern:** Perform standard 2D sketches (`.rect()`, `.polygon()`), extrude/loft to a 3D solid, and then apply 3D edge operations explicitly (e.g., `.edges("|Z").fillet(radius)`).
 
+### Directive 3a — `.text()` API (No `cut` kwarg)
+* **Problem:** `Workplane.text()` does NOT accept a `cut` keyword argument. Passing `cut=True` or `cut=False` raises `TypeError: Workplane.text() got an unexpected keyword argument 'cut'`.
+* **Valid Signature:** `.text(txt, fontsize, distance, combine=True, font="Arial")`
+* **Mandatory Pattern:** To add raised text, use a positive `distance`. To engrave/cut text, use a negative `distance`. Never pass `cut=`.
+
 ### Directive 4 — Safe Filleting (Prevent BRep Crashes)
 * **Problem:** Hardcoded large fillet radii crash the OpenCASCADE topology engine on thin walls or small features (`StdFail_NotDone`).
 * **Mandatory Pattern:** When a prompt requests smooth or ergonomic edges without specifying an exact radius, default to a safe radius (`1.0` or `2.0`). Mathematically ensure `radius < (thinnest_dimension / 2)`.

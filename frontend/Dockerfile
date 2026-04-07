@@ -1,7 +1,7 @@
 FROM python:3.10-slim
 
 # Added requests so Streamlit can talk to the FastAPI backend
-RUN pip install --no-cache-dir streamlit requests
+RUN pip install --no-cache-dir streamlit requests streamlit-ace
 
 WORKDIR /app
 
