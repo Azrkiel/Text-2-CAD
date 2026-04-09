@@ -16,11 +16,23 @@ from pydantic import BaseModel, Field
 class PartDefinition(BaseModel):
     """A single mechanical part to be manufactured by the Machinist subagent.
 
-    Each part is generated in COMPLETE ISOLATION. The Machinist receives only
+    Each part is generated in COMPLETE ISOLATION — the Machinist receives only
     this definition and must produce a self-contained CadQuery script that
     creates the part centered at the origin. The part's relationship to the
     broader assembly is handled entirely by anchor_tags and MatingRules —
     the Machinist must NEVER embed assembly-level positioning logic.
+
+    EXCEPTION — Coupled Geometric Subsystems (Domain D Aerospace):
+    When a part represents a tightly coupled aerodynamic subsystem (e.g., a
+    wing segment with internal ribs and spars), the Machinist is permitted —
+    and REQUIRED — to generate the entire subsystem within a single self-
+    contained script. This is necessary because internal structures depend on
+    a shared tooling body (the ``inner_void`` — the directly-lofted airfoil
+    core solid). Splitting such a subsystem across multiple PartDefinition
+    entries makes it impossible to share that master geometry, causing ribs
+    to clip through shell walls. In these cases the Machinist must produce a
+    ``cq.Assembly`` containing all sub-bodies (skin, ribs, spars) and assign
+    it to ``result``.
     """
 
     part_id: str = Field(

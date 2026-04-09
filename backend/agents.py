@@ -108,13 +108,35 @@ async def run_planner(user_prompt: str) -> AssemblyManifest:
             "with translation '0, 0, 0' and clearance 0.0. This signals the pipeline "
             "to skip the assembly step and export the part directly. "
             "\n"
+            "DOMAIN D AEROSPACE SUBSYSTEM RULE (OVERRIDES MULTI-PART RULE A): "
+            "When the request involves an aerodynamic structure with internal "
+            "reinforcement — specifically a wing, stabilizer, fin, or airfoil "
+            "segment that contains ribs, spars, bulkheads, or any internal "
+            "structural members — you MUST NOT decompose it into separate "
+            "PartDefinition entries (e.g., do NOT create 'wing_skin', 'rib_1', "
+            "'rib_2', 'spar_front' as separate parts). "
+            "Instead, define a SINGLE PartDefinition with part_id "
+            "'wing_segment_assembly' (or an appropriate name). In the "
+            "description field, explicitly instruct the Machinist to: "
+            "  (1) Loft the airfoil core solid — this IS the inner_void. "
+            "  (2) Shell the inner_void OUTWARD (positive wall thickness) to grow the skin. "
+            "  (3) Generate all ribs and spars by intersecting oversized blanks "
+            "      with inner_void. "
+            "  (4) Package everything into a cq.Assembly and assign it to result. "
+            "Include the requested rib count, spar count, NACA code, chord, span, "
+            "and any other parameters in the description. "
+            "Use anchor_tags: ['>Z', '<Z', '>X', '<X', '<Y', '>Y']. "
+            "This is MANDATORY because internal ribs depend on a shared boolean "
+            "tooling body (the inner_void) that cannot be split across scripts. "
+            "Create a self-referencing mating_rule with translation '0, 0, 0'. "
+            "\n"
             "MULTI-PART PLANNING RULES: "
-            "(A) You MUST break down every multi-part assembly into DISTINCT, INDIVIDUALLY "
-            "NAMED parts. Do NOT group identical parts into a single entry. For example, a "
-            "table must have 'tabletop', 'leg_1', 'leg_2', 'leg_3', 'leg_4' — five "
-            "separate PartDefinition entries, NOT 'tabletop' and 'legs'. Even if parts "
-            "are geometrically identical, each instance must be its own entry with a "
-            "unique part_id. "
+            "(A) For NON-aerospace assemblies, you MUST break down every multi-part "
+            "assembly into DISTINCT, INDIVIDUALLY NAMED parts. Do NOT group identical "
+            "parts into a single entry. For example, a table must have 'tabletop', "
+            "'leg_1', 'leg_2', 'leg_3', 'leg_4' — five separate PartDefinition "
+            "entries, NOT 'tabletop' and 'legs'. Even if parts are geometrically "
+            "identical, each instance must be its own entry with a unique part_id. "
             "(B) Each MatingRule's 'translation' field MUST contain the precise absolute "
             "3D coordinate (X, Y, Z) in millimeters for where to place the target part. "
             "The base/first part is always at '0, 0, 0'."
@@ -229,13 +251,20 @@ async def run_machinist_batch(parts: list[PartDefinition]) -> dict[str, str]:
 
 
 async def run_single_part_export(part_script: str, output_filename: str) -> str:
-    """Generate a simple export script for single-part models (no assembly)."""
+    """Generate a simple export script for single-part models (no assembly).
+
+    If the Machinist already produced a cq.Assembly (e.g., Domain D subsystem),
+    we save it directly instead of nesting it inside another assembly.
+    """
     return (
         f"{part_script}\n\n"
         f"import cadquery as cq\n"
-        f"assembly = cq.Assembly()\n"
-        f"assembly.add(result, name='part')\n"
-        f"assembly.save('{output_filename}')\n"
+        f"if isinstance(result, cq.Assembly):\n"
+        f"    result.save('{output_filename}')\n"
+        f"else:\n"
+        f"    _export_asm = cq.Assembly()\n"
+        f"    _export_asm.add(result, name='part')\n"
+        f"    _export_asm.save('{output_filename}')\n"
     )
 
 
