@@ -9,10 +9,15 @@ context isolation.
 
 Subagent Flow:
   User Prompt → Planner → [Machinist + Critic Loop] × N (concurrent) → Assembler → .glb
+
+The Assembler is now DETERMINISTIC — it loads pre-compiled .step files
+and applies manifest translations directly via CadQuery, with zero LLM
+involvement. Telemetry is captured for every Machinist attempt.
 """
 
 import asyncio
 import json
+import pathlib
 import re
 from typing import Any
 
@@ -22,8 +27,12 @@ from classifier import classify_part
 from compiler import execute_cad_script
 from schemas import AssemblyManifest, PartDefinition
 from strategies import get_strategy
+from telemetry import log_attempt
 
 MODEL = "gemini-2.5-flash"
+
+# Directory for pre-compiled .step files consumed by the deterministic assembler
+_TMP_PARTS_DIR = pathlib.Path(__file__).parent / "tmp_parts"
 
 
 class ScriptError(RuntimeError):
@@ -161,16 +170,16 @@ def is_single_part(manifest: AssemblyManifest) -> bool:
     return False
 
 
-async def run_machinist(part_def: PartDefinition, error_context: str = "") -> str:
+async def run_machinist(
+    part_def: PartDefinition, domain: str = "A", error_context: str = "",
+) -> str:
     """Subagent 2: The Machinist.
 
     Generates isolated CadQuery Python code for a single part.
-    Classifies the part into a geometric domain first, then applies the
-    domain-specific strategy prompt.
+    The domain must be pre-classified by the caller; the system prompt
+    is built dynamically based on domain and part description keywords.
     """
-    classification = await classify_part(part_def.description)
-    domain = classification.get("domain", "A")
-    system_prompt = get_strategy(domain)
+    system_prompt = get_strategy(domain, part_def.description)
 
     model = genai.GenerativeModel(
         model_name=MODEL,
@@ -196,21 +205,65 @@ async def run_machinist(part_def: PartDefinition, error_context: str = "") -> st
     return _strip_markdown_fences(response.text)
 
 
-async def run_critic_loop(part_def: PartDefinition, max_retries: int = 3) -> str:
+async def _save_part_step(part_id: str, script: str) -> str:
+    """Save a compiled part as an isolated .step file for the deterministic assembler.
+
+    Re-executes the validated script with an appended export stanza.
+    Returns the absolute path to the saved .step file.
+    """
+    _TMP_PARTS_DIR.mkdir(exist_ok=True)
+    step_path = (_TMP_PARTS_DIR / f"{part_id}.step").resolve()
+    safe_path = step_path.as_posix()
+
+    export_script = (
+        f"{script}\n\n"
+        f"import cadquery as cq, os\n"
+        f"os.makedirs(os.path.dirname(r'{safe_path}'), exist_ok=True)\n"
+        f"if isinstance(result, cq.Assembly):\n"
+        f"    result.save(r'{safe_path}')\n"
+        f"else:\n"
+        f"    cq.exporters.export(result, r'{safe_path}')\n"
+    )
+    await execute_cad_script(export_script)
+    return safe_path
+
+
+async def run_critic_loop(
+    part_def: PartDefinition, max_retries: int = 3,
+) -> tuple[str, str]:
     """Subagent 3: The QA Inspector (Critic Loop).
 
     Runs the Machinist's code via subprocess with concurrency control.
     On failure, feeds the traceback back for self-correction.
+
+    Returns:
+        (validated_code, step_file_path) — the clean CadQuery source and
+        the absolute path to the pre-compiled .step file.
     """
     async with _MACHINIST_SEMAPHORE:
+        # Classify once per part — domain is stable across retries
+        classification = await classify_part(part_def.description)
+        domain = classification.get("domain", "A")
+
         error_context = ""
 
         for attempt in range(1, max_retries + 1):
-            code = await run_machinist(part_def, error_context=error_context)
+            code = await run_machinist(part_def, domain=domain, error_context=error_context)
             result = await execute_cad_script(code)
 
-            if result["status"] == "success":
-                return code
+            success = result["status"] == "success"
+            log_attempt(
+                part_id=part_def.part_id,
+                domain=domain,
+                attempt=attempt,
+                code=code,
+                error=None if success else result.get("traceback"),
+                success=success,
+            )
+
+            if success:
+                step_path = await _save_part_step(part_def.part_id, code)
+                return code, step_path
 
             error_context = result["traceback"]
             if attempt == max_retries:
@@ -223,12 +276,18 @@ async def run_critic_loop(part_def: PartDefinition, max_retries: int = 3) -> str
         raise ScriptError(f"Part '{part_def.part_id}' failed unexpectedly.")
 
 
-async def run_machinist_batch(parts: list[PartDefinition]) -> dict[str, str]:
+async def run_machinist_batch(
+    parts: list[PartDefinition],
+) -> tuple[dict[str, str], dict[str, str]]:
     """Run all Machinist critic loops concurrently with rate limiting.
 
     Deduplicates parts with identical descriptions: calls the Machinist
     only once per unique description and reuses the cached code for all
     identical parts.
+
+    Returns:
+        (part_scripts, step_files) — two dicts mapping part_id to
+        validated code and to the pre-compiled .step file path.
     """
     # Group parts by description for deduplication
     desc_to_parts: dict[str, list[PartDefinition]] = {}
@@ -241,13 +300,20 @@ async def run_machinist_batch(parts: list[PartDefinition]) -> dict[str, str]:
     tasks = [run_critic_loop(part) for part in unique_parts]
     results = await asyncio.gather(*tasks)
 
-    # Map representative description -> generated code
-    desc_to_code = {
-        part.description: code for part, code in zip(unique_parts, results)
+    # Map representative description -> (code, step_path)
+    desc_to_result = {
+        part.description: result for part, result in zip(unique_parts, results)
     }
 
-    # Fan out cached code to all parts sharing the same description
-    return {part.part_id: desc_to_code[part.description] for part in parts}
+    # Fan out cached results to all parts sharing the same description
+    part_scripts: dict[str, str] = {}
+    step_files: dict[str, str] = {}
+    for part in parts:
+        code, step_path = desc_to_result[part.description]
+        part_scripts[part.part_id] = code
+        step_files[part.part_id] = step_path
+
+    return part_scripts, step_files
 
 
 async def run_single_part_export(part_script: str, output_filename: str) -> str:
@@ -268,96 +334,77 @@ async def run_single_part_export(part_script: str, output_filename: str) -> str:
     )
 
 
-async def run_assembler(
-    manifest: AssemblyManifest, part_scripts: dict[str, str],
-    error_context: str = "",
+# --------------------------------------------------------------------------
+# Phase 1: Deterministic Assembler (ZERO LLM involvement)
+# --------------------------------------------------------------------------
+
+def run_assembler(
+    manifest: AssemblyManifest,
+    step_files: dict[str, str],
 ) -> str:
-    """Subagent 4: The Assembler.
+    """Deterministic assembler — generates a CadQuery script from .step files.
 
-    Takes all validated part scripts and the mating rules, then writes a
-    single final CadQuery script that assembles everything and exports to .glb.
+    Loads each pre-compiled .step file via cq.importers.importStep(),
+    applies the exact X, Y, Z translations from the manifest's mating_rules,
+    adds them to a cq.Assembly, and saves the final .glb and .step files.
+
+    No LLM is involved. The output is a fully deterministic script.
     """
-    model = genai.GenerativeModel(
-        model_name=MODEL,
-        system_instruction=(
-            "You are the Assembler for a mechanical CAD system. Your job is to "
-            "write a single, final CadQuery Python script that combines multiple "
-            "individual parts into one assembly using cq.Assembly(). "
-            "\n"
-            "RULES: "
-            "(1) Import cadquery as cq at the top. "
-            "(2) Paste each part's code inline (do NOT use file imports). Each "
-            "part script defines a variable named 'result'. Rename each to a "
-            "unique variable (e.g., base_plate, leg_1) immediately after pasting. "
-            "(3) Create the assembly: assembly = cq.Assembly() "
-            "(4) Add each part using the EXACT translation coordinates from the "
-            "mating rules. The 'translation' field contains 'X, Y, Z' values. "
-            "Parse them and use: "
-            "assembly.add(part_var, name='part_id', loc=cq.Location(cq.Vector(X, Y, Z))) "
-            "The base/first part is always at (0, 0, 0). "
-            "\n"
-            "CRITICAL — DO NOT use assembly.constrain() or assembly.solve(). "
-            "DO NOT try to compute positions yourself. Use ONLY the translation "
-            "coordinates provided in the mating rules. They are pre-computed. "
-            "\n"
-            "(5) End the script with: assembly.save('output.glb') "
-            "(6) Return ONLY raw executable Python. No markdown, no code fences. "
-            "(7) If there is only ONE part, simply create the assembly, add it at "
-            "the origin, and save."
-        ),
-    )
+    lines = ["import cadquery as cq", ""]
+    lines.append("assembly = cq.Assembly()")
+    lines.append("")
 
-    parts_section = ""
-    for part_id, code in part_scripts.items():
-        parts_section += f"\n--- Part: {part_id} ---\n{code}\n"
+    added: set[str] = set()
 
-    rules_section = ""
-    for rule in manifest.mating_rules:
-        rules_section += (
-            f"  - Place '{rule.target_part_id}' at translation ({rule.translation}) "
-            f"[mating {rule.source_part_id}@{rule.source_anchor} "
-            f"to {rule.target_part_id}@{rule.target_anchor}, "
-            f"clearance: {rule.clearance}mm]\n"
+    # Add each part at its manifest-specified position
+    for part in manifest.parts:
+        pid = part.part_id
+        if pid in added or pid not in step_files:
+            continue
+
+        # Find translation: look for a mating rule where this part is the target.
+        # The base/first part is never a target — defaults to origin (0, 0, 0).
+        tx, ty, tz = 0.0, 0.0, 0.0
+        for rule in manifest.mating_rules:
+            if rule.target_part_id == pid:
+                coords = [float(v.strip()) for v in rule.translation.split(",")]
+                tx, ty, tz = coords[0], coords[1], coords[2]
+                break
+
+        safe_path = step_files[pid].replace("\\", "/")
+        var = pid.replace("-", "_").replace(" ", "_")
+
+        lines.append(f"{var} = cq.importers.importStep(r'{safe_path}')")
+        lines.append(
+            f"assembly.add({var}, name='{pid}', "
+            f"loc=cq.Location(cq.Vector({tx}, {ty}, {tz})))"
         )
+        lines.append("")
+        added.add(pid)
 
-    prompt = (
-        f"Assembly Name: {manifest.assembly_name}\n\n"
-        f"== VALIDATED PART SCRIPTS ==\n{parts_section}\n"
-        f"== MATING RULES ==\n{rules_section}\n"
-        f"Write the final assembly script."
-    )
+    lines.append("assembly.save('output.glb')")
+    lines.append("assembly.save('output.step')")
 
-    if error_context:
-        prompt += (
-            f"\nYour previous assembly script FAILED with this error:\n"
-            f"---\n{error_context}\n---\n"
-            f"Fix the script to resolve this error. "
-            f"Return the complete corrected script."
-        )
-
-    response = await model.generate_content_async(prompt)
-    return _strip_markdown_fences(response.text)
+    return "\n".join(lines)
 
 
 async def run_assembly_critic_loop(
-    manifest: AssemblyManifest, part_scripts: dict[str, str], max_retries: int = 3,
+    manifest: AssemblyManifest,
+    step_files: dict[str, str],
 ) -> str:
-    """Critic loop for the Assembler — retries on execution failure."""
-    error_context = ""
+    """Execute the deterministic assembler and return the script.
 
-    for attempt in range(1, max_retries + 1):
-        code = await run_assembler(manifest, part_scripts, error_context=error_context)
-        result = await execute_cad_script(code)
+    Unlike the old LLM-based assembler, this has no retry loop — the
+    script is deterministic. If it fails, the error is structural
+    (bad .step file or missing part) and retrying won't help.
+    """
+    script = run_assembler(manifest, step_files)
+    result = await execute_cad_script(script)
 
-        if result["status"] == "success":
-            return code
+    if result["status"] != "success":
+        raise ScriptError(
+            f"Deterministic assembly failed:\n{result['traceback']}",
+            script=script,
+        )
 
-        error_context = result["traceback"]
-        if attempt == max_retries:
-            raise ScriptError(
-                f"Assembly failed after {max_retries} attempts. "
-                f"Last error:\n{error_context}",
-                script=code,
-            )
-
-    raise ScriptError("Assembly failed unexpectedly.")
+    return script

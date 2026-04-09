@@ -30,3 +30,7 @@ Thumbs.db
 *.glb
 *.stl
 *.step
+
+# Pipeline runtime directories
+backend/tmp_parts/
+backend/telemetry_logs/

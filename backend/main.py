@@ -81,7 +81,7 @@ async def _pipeline(prompt: str) -> AsyncGenerator[str, None]:
         label = f"machinist:{part.part_id}"
         yield _event(label, "running", "Manufacturing single part")
         try:
-            code = await run_critic_loop(part)
+            code, _ = await run_critic_loop(part)
         except ScriptError as e:
             yield _event(label, "error", str(e))
             error_complete = {
@@ -136,14 +136,17 @@ async def _pipeline(prompt: str) -> AsyncGenerator[str, None]:
 
         # Run concurrently with semaphore-based rate limiting
         async def _build_part(part):
-            return part.part_id, await run_critic_loop(part)
+            code, step_path = await run_critic_loop(part)
+            return part.part_id, code, step_path
 
         tasks = [_build_part(part) for part in parts]
         part_scripts: dict[str, str] = {}
+        step_files: dict[str, str] = {}
         for coro in asyncio.as_completed(tasks):
             try:
-                part_id, code = await coro
+                part_id, code, step_path = await coro
                 part_scripts[part_id] = code
+                step_files[part_id] = step_path
                 yield _event(labels[part_id], "done", f"Part '{part_id}' validated")
             except ScriptError as e:
                 yield _event("machinist", "error", str(e))
@@ -166,10 +169,10 @@ async def _pipeline(prompt: str) -> AsyncGenerator[str, None]:
                 yield f"data: {json.dumps(error_complete)}\n\n"
                 return
 
-        # Assembler with critic loop
-        yield _event("assembler", "running", "Assembling and compiling (up to 3 attempts)")
+        # Deterministic assembler (no LLM, no retries)
+        yield _event("assembler", "running", "Assembling from pre-compiled .step files")
         try:
-            final_script = await run_assembly_critic_loop(manifest, part_scripts)
+            final_script = await run_assembly_critic_loop(manifest, step_files)
             final_script = final_script.replace("output.glb", output_filename)
         except ScriptError as e:
             yield _event("assembler", "error", str(e))
