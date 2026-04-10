@@ -224,7 +224,7 @@ async def _save_part_step(part_id: str, script: str) -> str:
         f"else:\n"
         f"    cq.exporters.export(result, r'{safe_path}')\n"
     )
-    await execute_cad_script(export_script)
+    await execute_cad_script(export_script, trusted=True)
     return safe_path
 
 
@@ -398,6 +398,12 @@ async def run_assembly_critic_loop(
     script is deterministic. If it fails, the error is structural
     (bad .step file or missing part) and retrying won't help.
     """
+    if len(step_files) != len(manifest.parts):
+        raise ScriptError(
+            f"Assembly failed: Missing compiled parts. Expected "
+            f"{len(manifest.parts)} parts, but only got {len(step_files)}."
+        )
+
     script = run_assembler(manifest, step_files)
     result = await execute_cad_script(script)
 

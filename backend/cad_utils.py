@@ -340,6 +340,15 @@ def make_naca_airfoil(
     return result
 
 
+def make_co2_void(diameter: float = 19.5, depth: float = 52.0) -> cq.Workplane:
+    """Generate a standard CO2 cartridge cavity for boolean cutting."""
+    result = cq.Workplane("YZ").circle(diameter / 2.0).extrude(depth)
+    val = result.val()
+    if not isinstance(val, cq.Solid):
+        raise ValueError("CO2 void validation failed.")
+    return result
+
+
 def make_metric_thread(
     diameter: float,
     pitch: float,

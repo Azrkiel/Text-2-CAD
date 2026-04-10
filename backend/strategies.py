@@ -595,6 +595,19 @@ RULE_BLOCKS = {
         "If the user specifies a NACA designation like 'NACA 0012' or 'NACA 4415', "
         "extract the 4-digit code and pass it to make_naca_wire(). "
     ),
+
+    "rule_co2_dragster": (
+        "CO2 DRAGSTER STRATEGY (MANDATORY): "
+        "When generating a CO2 dragster, you MUST follow this exact boolean sequence: "
+        "1. Generate the main aerodynamic body (assume length runs along X-axis). "
+        "2. Import: from cad_utils import make_co2_void. "
+        "3. Instantiate: co2 = make_co2_void(). "
+        "4. Translate void to the REAR of the car. "
+        "5. Cut chamber: body = body.cut(co2). "
+        "6. Cut front and rear axle holes using "
+        ".workplane('XZ').center(...).circle(r).cutThruAll(). "
+        "DO NOT manually model the CO2 chamber."
+    ),
 }
 
 
@@ -675,6 +688,9 @@ _KEYWORD_TRIGGERS = {
     "rule_text_api": [
         "text", "label", "engrav", "emboss", "letter", "font",
         "inscri", "carve",
+    ],
+    "rule_co2_dragster": [
+        "dragster", "co2 car", "derby car", "race car",
     ],
 }
 

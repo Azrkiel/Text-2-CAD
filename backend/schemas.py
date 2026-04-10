@@ -10,7 +10,7 @@ Absolute floating-point coordinates (x, y, z) are FORBIDDEN for mating.
 Parts are connected via named anchor tags that reference CadQuery selectors.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class PartDefinition(BaseModel):
@@ -197,3 +197,17 @@ class AssemblyManifest(BaseModel):
             "from the chain of relative constraints."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_mating_rule_refs(self) -> "AssemblyManifest":
+        valid_ids = {p.part_id for p in self.parts}
+        for rule in self.mating_rules:
+            if rule.source_part_id not in valid_ids:
+                raise ValueError(
+                    f"Mating rule references undefined part: {rule.source_part_id}"
+                )
+            if rule.target_part_id not in valid_ids:
+                raise ValueError(
+                    f"Mating rule references undefined part: {rule.target_part_id}"
+                )
+        return self
