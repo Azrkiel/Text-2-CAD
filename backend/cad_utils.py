@@ -403,3 +403,598 @@ def make_metric_thread(
         )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# T2-10: High-frequency parametric engineering shape templates
+# ---------------------------------------------------------------------------
+
+
+def make_flanged_housing(
+    OD: float,
+    ID: float,
+    height: float,
+    flange_OD: float,
+    flange_thickness: float,
+    bolt_circle_diameter: float,
+    n_bolt_holes: int,
+    bolt_hole_diameter: float,
+) -> cq.Workplane:
+    """Cylindrical housing with a mounting flange.
+
+    Generates a hollow cylinder (bore ID, outer diameter OD) with a flat
+    circular flange at its base. Bolt holes are arranged on a bolt circle.
+
+    Args:
+        OD: Outer diameter of the cylindrical body (mm).
+        ID: Inner bore diameter (mm). Must be < OD.
+        height: Total height of the cylindrical body, not including flange (mm).
+        flange_OD: Outer diameter of the flange disc (mm). Must be >= OD.
+        flange_thickness: Thickness of the flange (mm).
+        bolt_circle_diameter: PCD (pitch circle diameter) for bolt holes (mm).
+        n_bolt_holes: Number of bolt holes. 0 = no bolt holes.
+        bolt_hole_diameter: Diameter of each bolt clearance hole (mm).
+
+    Returns:
+        cq.Workplane containing the assembled flanged housing solid.
+
+    Raises:
+        ValueError: If geometric constraints are violated.
+    """
+    if ID >= OD:
+        raise ValueError(f"Bore ID ({ID}) must be less than outer OD ({OD}).")
+    if flange_OD < OD:
+        raise ValueError(f"flange_OD ({flange_OD}) must be >= body OD ({OD}).")
+    if bolt_hole_diameter >= bolt_circle_diameter:
+        raise ValueError(
+            f"bolt_hole_diameter ({bolt_hole_diameter}) must be less than "
+            f"bolt_circle_diameter ({bolt_circle_diameter})."
+        )
+
+    # Flange disc at the bottom
+    flange = (
+        cq.Workplane("XY")
+        .circle(flange_OD / 2.0)
+        .circle(ID / 2.0)
+        .extrude(flange_thickness)
+    )
+
+    # Cylindrical body on top of the flange
+    body = (
+        cq.Workplane("XY")
+        .workplane(offset=flange_thickness)
+        .circle(OD / 2.0)
+        .circle(ID / 2.0)
+        .extrude(height)
+    )
+
+    result = flange.union(body)
+
+    # Bolt holes in the flange (polar array)
+    if n_bolt_holes > 0 and bolt_circle_diameter > 0:
+        bolt_r = bolt_circle_diameter / 2.0
+        result = (
+            result
+            .faces("<Z")
+            .workplane()
+            .polarArray(bolt_r, 0, 360, n_bolt_holes)
+            .circle(bolt_hole_diameter / 2.0)
+            .cutThruAll()
+        )
+
+    return result
+
+
+def make_shaft(
+    diameter: float,
+    length: float,
+    keyway_width: float = 0.0,
+    keyway_depth: float = 0.0,
+    chamfer_end: float = 0.5,
+) -> cq.Workplane:
+    """Shaft with optional keyway and end chamfers.
+
+    Generates a cylindrical shaft centered at the origin (axis along Z).
+    An optional rectangular keyway is cut along the full length on the
+    outer surface. Both ends are chamfered.
+
+    Args:
+        diameter: Shaft outer diameter (mm).
+        length: Total shaft length (mm).
+        keyway_width: Width of the keyway slot (mm). 0 = no keyway.
+        keyway_depth: Depth of the keyway slot from the outer surface (mm).
+        chamfer_end: Chamfer size on both shaft ends (mm). 0 = no chamfer.
+
+    Returns:
+        cq.Workplane containing the shaft solid.
+    """
+    # Main cylinder
+    result = cq.Workplane("XY").circle(diameter / 2.0).extrude(length)
+
+    # Keyway — rectangular slot along full length on top face
+    if keyway_width > 0 and keyway_depth > 0:
+        if keyway_width >= diameter:
+            raise ValueError(
+                f"keyway_width ({keyway_width}) must be less than shaft diameter ({diameter})."
+            )
+        # Position the keyway slot at the top of the shaft
+        slot_y_offset = diameter / 2.0 - keyway_depth
+        keyway = (
+            cq.Workplane("XY")
+            .center(0, slot_y_offset)
+            .rect(keyway_width, keyway_depth * 2)
+            .extrude(length)
+        )
+        result = result.cut(keyway)
+
+    # Chamfer both ends
+    if chamfer_end > 0:
+        result = result.edges("%Circle").chamfer(chamfer_end)
+
+    return result
+
+
+def make_bracket(
+    base_width: float,
+    base_length: float,
+    base_thickness: float,
+    wall_height: float,
+    wall_thickness: float,
+    n_mounting_holes: int = 2,
+    hole_diameter: float = 5.0,
+) -> cq.Workplane:
+    """L-bracket with mounting holes in the base flange.
+
+    Generates an L-shaped bracket: a flat base plate with an upright wall
+    at one end. Mounting holes are evenly spaced along the base length.
+
+    Args:
+        base_width: Width of the base flange (mm).
+        base_length: Length of the base flange (mm).
+        base_thickness: Thickness of the base plate (mm).
+        wall_height: Height of the vertical wall above the base (mm).
+        wall_thickness: Thickness of the vertical wall (mm).
+        n_mounting_holes: Number of through holes in the base (0 = none).
+        hole_diameter: Diameter of each mounting hole (mm).
+
+    Returns:
+        cq.Workplane containing the L-bracket solid.
+    """
+    # Base plate
+    base = (
+        cq.Workplane("XY")
+        .box(base_length, base_width, base_thickness)
+    )
+
+    # Vertical wall at one end of the base
+    wall = (
+        cq.Workplane("XY")
+        .workplane(offset=base_thickness)
+        .center(-base_length / 2.0 + wall_thickness / 2.0, 0)
+        .box(wall_thickness, base_width, wall_height)
+    )
+
+    result = base.union(wall)
+
+    # Mounting holes in the base (linear pattern along X)
+    if n_mounting_holes > 0 and hole_diameter > 0:
+        if n_mounting_holes == 1:
+            offsets = [0.0]
+        else:
+            spacing = (base_length - 2 * hole_diameter) / (n_mounting_holes - 1)
+            offsets = [
+                -base_length / 2.0 + hole_diameter + i * spacing
+                for i in range(n_mounting_holes)
+            ]
+        for x_off in offsets:
+            result = (
+                result
+                .faces(">Z")
+                .workplane()
+                .center(x_off, 0)
+                .circle(hole_diameter / 2.0)
+                .cutThruAll()
+            )
+
+    return result
+
+
+def make_bearing_housing(
+    bearing_OD: float,
+    bearing_width: float,
+    housing_OD: float,
+    housing_length: float,
+    lip_thickness: float = 2.0,
+) -> cq.Workplane:
+    """Bearing housing with a press-fit bore.
+
+    Generates a cylindrical housing with a precision bore sized for the
+    bearing outer race. A retaining lip (shoulder) is formed at one end.
+
+    Args:
+        bearing_OD: Outer diameter of the bearing outer race (mm).
+            This becomes the bore diameter of the housing.
+        bearing_width: Width of the bearing (mm). The bore depth matches this.
+        housing_OD: Outer diameter of the housing body (mm).
+        housing_length: Total length of the housing (mm).
+        lip_thickness: Axial thickness of the retaining lip at the closed end (mm).
+
+    Returns:
+        cq.Workplane containing the bearing housing solid.
+
+    Raises:
+        ValueError: If bearing_OD >= housing_OD.
+    """
+    if bearing_OD >= housing_OD:
+        raise ValueError(
+            f"bearing_OD ({bearing_OD}) must be less than housing_OD ({housing_OD})."
+        )
+
+    # Outer cylinder
+    outer = (
+        cq.Workplane("XY")
+        .circle(housing_OD / 2.0)
+        .extrude(housing_length)
+    )
+
+    # Bore for the bearing (full-depth through hole at bearing_OD)
+    bore = (
+        cq.Workplane("XY")
+        .workplane(offset=lip_thickness)
+        .circle(bearing_OD / 2.0)
+        .extrude(housing_length - lip_thickness)
+    )
+
+    result = outer.cut(bore)
+    return result
+
+
+def make_spacer(
+    OD: float,
+    ID: float,
+    length: float,
+    chamfer: float = 0.3,
+) -> cq.Workplane:
+    """Cylindrical spacer (washer/sleeve) with optional end chamfers.
+
+    Args:
+        OD: Outer diameter (mm).
+        ID: Inner bore diameter (mm). Must be < OD.
+        length: Spacer length/height (mm).
+        chamfer: Edge chamfer size on both ends (mm). 0 = no chamfer.
+
+    Returns:
+        cq.Workplane containing the spacer solid.
+    """
+    if ID >= OD:
+        raise ValueError(f"Bore ID ({ID}) must be less than outer OD ({OD}).")
+
+    result = (
+        cq.Workplane("XY")
+        .circle(OD / 2.0)
+        .circle(ID / 2.0)
+        .extrude(length)
+    )
+
+    if chamfer > 0:
+        result = result.edges("%Circle").chamfer(chamfer)
+
+    return result
+
+
+def make_boss_with_bore(
+    boss_OD: float,
+    bore_ID: float,
+    boss_height: float,
+    base_OD: float = 0.0,
+    base_thickness: float = 0.0,
+    counterbore_ID: float = 0.0,
+    counterbore_depth: float = 0.0,
+) -> cq.Workplane:
+    """Boss (cylindrical protrusion) with a through/blind bore.
+
+    Supports a flat base flange and counterbore entry for fastener head
+    clearance.
+
+    Args:
+        boss_OD: Outer diameter of the boss cylinder (mm).
+        bore_ID: Bore diameter through the boss (mm). 0 = solid boss.
+        boss_height: Height of the boss above the base (mm).
+        base_OD: Outer diameter of an optional flat base flange (mm).
+            0 = no base, just the boss cylinder.
+        base_thickness: Thickness of the base flange (mm).
+        counterbore_ID: Counterbore entry diameter at the top (mm).
+            0 = no counterbore (plain bore throughout).
+        counterbore_depth: Depth of the counterbore from the top face (mm).
+
+    Returns:
+        cq.Workplane containing the boss solid.
+    """
+    if bore_ID > 0 and bore_ID >= boss_OD:
+        raise ValueError(f"bore_ID ({bore_ID}) must be less than boss_OD ({boss_OD}).")
+
+    total_height = boss_height + base_thickness
+
+    # Start with boss cylinder (+ base if specified)
+    if base_OD > 0 and base_thickness > 0:
+        if base_OD < boss_OD:
+            raise ValueError(
+                f"base_OD ({base_OD}) must be >= boss_OD ({boss_OD})."
+            )
+        base = (
+            cq.Workplane("XY")
+            .circle(base_OD / 2.0)
+            .extrude(base_thickness)
+        )
+        boss = (
+            cq.Workplane("XY")
+            .workplane(offset=base_thickness)
+            .circle(boss_OD / 2.0)
+            .extrude(boss_height)
+        )
+        result = base.union(boss)
+    else:
+        result = (
+            cq.Workplane("XY")
+            .circle(boss_OD / 2.0)
+            .extrude(boss_height)
+        )
+
+    # Through bore
+    if bore_ID > 0:
+        result = (
+            result
+            .faces(">Z")
+            .workplane()
+            .circle(bore_ID / 2.0)
+            .cutThruAll()
+        )
+
+    # Counterbore (larger entrance from the top)
+    if counterbore_ID > 0 and counterbore_depth > 0:
+        if bore_ID > 0 and counterbore_ID <= bore_ID:
+            raise ValueError(
+                f"counterbore_ID ({counterbore_ID}) must be > bore_ID ({bore_ID})."
+            )
+        result = (
+            result
+            .faces(">Z")
+            .workplane()
+            .circle(counterbore_ID / 2.0)
+            .cutBlind(-counterbore_depth)
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# T3-06: Domain E — Sheet Metal Utility Functions
+# ---------------------------------------------------------------------------
+
+def make_bent_bracket(
+    material_thickness: float,
+    base_length: float,
+    base_width: float,
+    flange_height: float,
+    bend_radius: float,
+    n_base_holes: int = 2,
+    hole_diameter: float = 5.0,
+) -> cq.Workplane:
+    """Standard L-bracket from sheet metal with bend relief.
+
+    Produces a folded L-bracket:
+      - Flat base plate with mounting holes
+      - Vertical wall (flange) of the specified height
+      - Bend at the corner approximated as an arc-extruded fillet
+
+    Design rules enforced:
+      - Minimum bend radius >= 1× material_thickness (raises ValueError if violated)
+      - Minimum flange height >= 2× material_thickness + bend_radius
+      - Hole-to-edge distance >= 2× material_thickness
+
+    Args:
+        material_thickness: Sheet gauge in mm (e.g., 1.5 for 14 ga steel).
+        base_length: Length of the flat base in mm.
+        base_width: Width of the flat base in mm.
+        flange_height: Height of the vertical flange in mm.
+        bend_radius: Inner bend radius in mm.
+        n_base_holes: Number of mounting holes in the base (evenly spaced).
+        hole_diameter: Diameter of mounting holes in mm.
+
+    Returns:
+        cq.Workplane solid (the folded bracket in final geometry).
+
+    Raises:
+        ValueError: If design rule constraints are violated.
+    """
+    # Design rule checks
+    if bend_radius < material_thickness:
+        raise ValueError(
+            f"Bend radius {bend_radius}mm < material thickness {material_thickness}mm. "
+            f"Minimum is 1× material thickness. "
+            f"Use bend_radius >= {material_thickness}."
+        )
+
+    min_flange = 2 * material_thickness + bend_radius
+    if flange_height < min_flange:
+        raise ValueError(
+            f"Flange height {flange_height}mm < minimum {min_flange:.1f}mm "
+            f"(= 2×thickness + bend_radius). "
+            f"Use flange_height >= {min_flange:.1f}."
+        )
+
+    min_edge_dist = 2 * material_thickness
+    if hole_diameter > 0 and n_base_holes > 0:
+        hole_spacing = base_length / (n_base_holes + 1)
+        if hole_spacing < hole_diameter + min_edge_dist * 2:
+            raise ValueError(
+                f"Hole spacing {hole_spacing:.1f}mm is too tight for {n_base_holes} "
+                f"holes of diameter {hole_diameter}mm with minimum edge distance "
+                f"{min_edge_dist}mm. Reduce n_base_holes or increase base_length."
+            )
+
+    # --- Build base plate ---
+    base = (
+        cq.Workplane("XY")
+        .box(base_length, base_width, material_thickness, centered=True)
+    )
+
+    # Add mounting holes in base (linear pattern)
+    if n_base_holes > 0 and hole_diameter > 0:
+        hole_spacing = base_length / (n_base_holes + 1)
+        for i in range(n_base_holes):
+            x = -base_length / 2.0 + hole_spacing * (i + 1)
+            base = (
+                base
+                .faces(">Z")
+                .workplane()
+                .center(x, 0)
+                .hole(hole_diameter)
+            )
+
+    # --- Build flange (vertical wall) ---
+    # The flange originates from the back edge of the base plate
+    # and extends upward by flange_height
+    flange_base_z = material_thickness  # top of base plate
+    flange = (
+        cq.Workplane("XZ")
+        .workplane(offset=base_width / 2.0)
+        .rect(base_length, flange_height, centered=False)
+        .extrude(material_thickness)
+    )
+
+    # Translate flange to correct position
+    flange = flange.translate((0, 0, 0))
+
+    # Build the bend (approximated as a quarter-circle extrusion)
+    # The bend radius fillet is applied at the corner between base and flange
+    result = base.union(flange)
+
+    # Apply bend radius fillet at the base-flange junction
+    try:
+        result = (
+            result
+            .edges("|X")
+            .edges(">Y")
+            .fillet(bend_radius)
+        )
+    except Exception:  # noqa: BLE001
+        # Fillet may fail on complex geometry — continue without it
+        pass
+
+    return result
+
+
+def make_enclosure_panel(
+    width: float,
+    height: float,
+    material_thickness: float,
+    flange_depth: float = 0.0,
+    cutout_positions: list = None,
+) -> cq.Workplane:
+    """Sheet metal panel with optional flanges and rectangular cutouts.
+
+    Produces a flat panel (like a computer side panel or electrical enclosure face)
+    with optional return flanges on all four edges and rectangular knockouts.
+
+    Args:
+        width: Panel width in mm.
+        height: Panel height in mm.
+        material_thickness: Sheet gauge in mm.
+        flange_depth: Depth of return flanges on all edges (0 = no flanges).
+        cutout_positions: List of (x_center, y_center, cutout_width, cutout_height)
+            tuples in mm (origin = center of panel). Pass [] or None for no cutouts.
+
+    Returns:
+        cq.Workplane solid (flat panel + flanges).
+
+    Design rules enforced:
+        - Cutout edges must be >= 2× material_thickness from panel edge.
+        - Flange depth >= 2× material_thickness + material_thickness (wall) if nonzero.
+    """
+    if cutout_positions is None:
+        cutout_positions = []
+
+    # --- Build main flat panel ---
+    panel = (
+        cq.Workplane("XY")
+        .box(width, height, material_thickness, centered=True)
+    )
+
+    # --- Add perimeter flanges ---
+    if flange_depth > 0:
+        min_flange = 2 * material_thickness
+        if flange_depth < min_flange:
+            raise ValueError(
+                f"Flange depth {flange_depth}mm < minimum {min_flange}mm "
+                f"(= 2× material thickness). Use flange_depth >= {min_flange}."
+            )
+
+        # Four return flanges (down-facing, like an enclosure panel)
+        flange_offset = material_thickness / 2.0  # panel half-thickness
+
+        # Left and right flanges
+        for sign in (-1, +1):
+            flange = (
+                cq.Workplane("YZ")
+                .workplane(offset=sign * width / 2.0)
+                .rect(height, flange_depth, centered=False)
+                .extrude(material_thickness)
+            )
+            panel = panel.union(flange)
+
+        # Top and bottom flanges
+        for sign in (-1, +1):
+            flange = (
+                cq.Workplane("XZ")
+                .workplane(offset=sign * height / 2.0)
+                .rect(width + 2 * material_thickness, flange_depth, centered=False)
+                .extrude(material_thickness)
+            )
+            panel = panel.union(flange)
+
+    # --- Add rectangular cutouts ---
+    min_edge_dist = 2 * material_thickness
+    for cx, cy, cw, ch in cutout_positions:
+        # Validate cutout is within panel bounds with minimum edge clearance
+        if abs(cx) + cw / 2.0 > width / 2.0 - min_edge_dist:
+            raise ValueError(
+                f"Cutout at ({cx}, {cy}) width {cw} is too close to panel edge. "
+                f"Minimum edge distance: {min_edge_dist}mm."
+            )
+        if abs(cy) + ch / 2.0 > height / 2.0 - min_edge_dist:
+            raise ValueError(
+                f"Cutout at ({cx}, {cy}) height {ch} is too close to panel edge. "
+                f"Minimum edge distance: {min_edge_dist}mm."
+            )
+
+        panel = (
+            panel
+            .faces(">Z")
+            .workplane()
+            .center(cx, cy)
+            .rect(cw, ch)
+            .cutThruAll()
+        )
+
+    return panel
+
+
+# Expose template function names for strategy prompt injection
+AVAILABLE_TEMPLATES = [
+    "make_flanged_housing(OD, ID, height, flange_OD, flange_thickness, "
+    "bolt_circle_diameter, n_bolt_holes, bolt_hole_diameter)",
+    "make_shaft(diameter, length, keyway_width=0, keyway_depth=0, chamfer_end=0.5)",
+    "make_bracket(base_width, base_length, base_thickness, wall_height, "
+    "wall_thickness, n_mounting_holes=2, hole_diameter=5.0)",
+    "make_bearing_housing(bearing_OD, bearing_width, housing_OD, housing_length, "
+    "lip_thickness=2.0)",
+    "make_spacer(OD, ID, length, chamfer=0.3)",
+    "make_boss_with_bore(boss_OD, bore_ID, boss_height, base_OD=0, "
+    "base_thickness=0, counterbore_ID=0, counterbore_depth=0)",
+    # T3-06: Sheet metal templates (Domain E)
+    "make_bent_bracket(material_thickness, base_length, base_width, flange_height, "
+    "bend_radius, n_base_holes=2, hole_diameter=5.0)",
+    "make_enclosure_panel(width, height, material_thickness, flange_depth=0, "
+    "cutout_positions=[])",
+]

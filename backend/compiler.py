@@ -15,7 +15,6 @@ import pathlib
 import signal
 import subprocess
 import sys
-import tempfile
 
 try:
     import resource
@@ -31,6 +30,20 @@ except ImportError:          # Windows — no resource module
 # Directory containing cad_utils.py and other backend modules.
 # Added to PYTHONPATH so subprocess-executed scripts can import them.
 _BACKEND_DIR = str(pathlib.Path(__file__).parent.resolve())
+
+# Writable working directory for subprocess-executed scripts. The host
+# `/app` bind mount is read-only (see docker-compose.yml), and CadQuery /
+# OCCT will happily drop temp files like `.stepcode.log` or
+# `SaveToFile.tmp` into cwd when saving, which would otherwise raise
+# PermissionError before the script's own save call even runs. Routing
+# cwd to the tmpfs sidesteps all of that.
+_WORK_DIR = pathlib.Path(os.environ.get("MIRUM_WORK_DIR", "/tmp/mirum/work"))
+try:
+    _WORK_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    # Fall back to the parent's cwd if even /tmp is unwritable — better
+    # to let the subprocess fail loudly than to crash module import.
+    pass
 
 # ---------------------------------------------------------------------------
 # AST Security Scanner (Allowlist Architecture)
@@ -105,9 +118,12 @@ def _preexec_sandbox() -> None:
 async def execute_cad_script(script_string: str) -> dict:
     """Execute a CadQuery Python script in a sandboxed subprocess.
 
-    The script is written to a temporary file and run as a separate process
-    to isolate the main application from crashes, infinite loops, or unsafe
-    operations in AI-generated code.
+    The script is piped to `python -` via stdin rather than written to a
+    temp file. This avoids an entire class of Windows permission errors:
+    on-access AV scanners (Avast, Defender) briefly lock freshly-written
+    .py files, causing `PermissionError: [Errno 13]` when either the
+    parent closes the temp file or the child tries to open it. With
+    stdin delivery there is no file for AV to touch.
 
     Args:
         script_string: Complete, self-contained Python/CadQuery source code.
@@ -121,29 +137,37 @@ async def execute_cad_script(script_string: str) -> dict:
     if violation:
         return {"status": "error", "traceback": violation}
 
-    tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".py",
-            delete=False,
-        ) as tmp:
-            tmp.write(script_string)
-            tmp_path = tmp.name
-
         env = {
             "PATH": os.environ.get("PATH", ""),
             "PYTHONPATH": _BACKEND_DIR,
             "HOME": os.environ.get("HOME", os.environ.get("USERPROFILE", "/tmp")),
             "LANG": os.environ.get("LANG", "C.UTF-8"),
-            "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),  # Required on Windows
         }
+        # Windows-specific env vars the Python runtime and its deps need.
+        # ezdxf (a CadQuery dep) calls pathlib.Path("~").expanduser() at import
+        # time; on Windows that checks USERPROFILE / HOMEDRIVE+HOMEPATH (NOT
+        # HOME), so without these the subprocess crashes before running user
+        # code. Inherit conditionally — only if set in the parent env.
+        for _key in (
+            "SYSTEMROOT", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+            "TEMP", "TMP", "APPDATA", "LOCALAPPDATA",
+        ):
+            _val = os.environ.get(_key)
+            if _val:
+                env[_key] = _val
 
         popen_kwargs: dict = dict(
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             env=env,
+            # Run inside a writable tmpfs location so any implicit
+            # relative-path writes (intermediate STEP logs, OCCT temp
+            # files, scripts that still use 'output.glb' etc.) land
+            # somewhere the unprivileged caduser can actually write.
+            cwd=str(_WORK_DIR) if _WORK_DIR.exists() else None,
         )
         if _HAS_RESOURCE:
             popen_kwargs["preexec_fn"] = _preexec_sandbox
@@ -151,9 +175,14 @@ async def execute_cad_script(script_string: str) -> dict:
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
         def _run() -> tuple[int, str, str]:
-            proc = subprocess.Popen([sys.executable, tmp_path], **popen_kwargs)
+            # `python -` reads the program from stdin. Tracebacks show the
+            # pseudo-filename "<stdin>", which main.py's _safe_error already
+            # collapses via its `File "..."` regex.
+            proc = subprocess.Popen([sys.executable, "-"], **popen_kwargs)
             try:
-                stdout, stderr = proc.communicate(timeout=30)
+                stdout, stderr = proc.communicate(
+                    input=script_string, timeout=30
+                )
             except subprocess.TimeoutExpired:
                 # Kill the entire process group, not just the parent
                 if _HAS_RESOURCE:
@@ -184,7 +213,3 @@ async def execute_cad_script(script_string: str) -> dict:
             "status": "error",
             "traceback": f"Execution error: {e}",
         }
-
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.remove(tmp_path)

@@ -15,6 +15,28 @@ waste context and confuse the model.
 # --------------------------------------------------------------------------
 # Modular rule blocks — each is a self-contained instruction unit
 # --------------------------------------------------------------------------
+FEATURE_VOCABULARY = (
+    "ENGINEERING FEATURE VOCABULARY — use these terms when interpreting prompts "
+    "and generating part descriptions. Prefer these terms over purely spatial language.\n"
+    "  - Boss: raised cylindrical protrusion (positive material feature)\n"
+    "  - Pocket: recessed cavity (negative material feature, open top)\n"
+    "  - Bore: through or blind cylindrical hole\n"
+    "  - Counterbore: stepped bore — larger diameter entry + smaller diameter depth\n"
+    "  - Countersink: conical chamfered bore entry (for flat-head screws)\n"
+    "  - Flange: flat rim extending from a cylindrical feature for mating\n"
+    "  - Web: thin connecting wall between structural ribs\n"
+    "  - Gusset: triangular reinforcing feature at a corner joint\n"
+    "  - Rib: thin plate projecting from a surface for stiffness\n"
+    "  - Thread boss: cylindrical protrusion with internal or external thread\n"
+    "  - Shell: thin-walled hollow version of a solid (uniform wall thickness)\n"
+    "  - Keyway: rectangular slot in a shaft or hub for a key\n"
+    "  - Spline: multi-lobe shaft feature for torque transmission\n"
+    "  - Chamfer: angled cut on an edge to remove the sharp corner\n"
+    "  - Fillet: rounded transition between two surfaces\n"
+    "  - Gudgeon pin: wrist pin connecting piston to connecting rod\n"
+    "  - Lands: raised cylindrical bands on a shaft for bearing contact\n"
+)
+
 RULE_BLOCKS = {
     # ── Core universal rules (always injected) ────────────────────────
     "rule_imports": (
@@ -93,6 +115,9 @@ RULE_BLOCKS = {
         "To add raised text: .text('hello', 8, 2) — default combine=True adds it. "
         "To cut engraved text: .text('hello', 8, -2) — use negative distance."
     ),
+
+    # ── Feature vocabulary rule (injected into A + B) ─────────────────
+    "rule_feature_vocabulary": FEATURE_VOCABULARY,
 
     # ── Domain A: Primitives / Structural ─────────────────────────────
     "rule_domain_a": (
@@ -204,6 +229,54 @@ RULE_BLOCKS = {
         "\n"
         "(C6) Apply .fillet() on sharp edges LAST, after the loft is complete. "
         "(C7) Ensure at least 3 cross-sections for smooth shapes (more = smoother)."
+    ),
+
+    # ── Domain E: Sheet Metal / Thin-Wall ─────────────────────────────
+    "rule_domain_e": (
+        "DOMAIN E STRATEGY — Sheet Metal and Thin-Wall Parts:\n"
+        "You are generating a sheet metal part using CadQuery.\n"
+        "\n"
+        "SHEET METAL DESIGN RULES (follow strictly):\n"
+        "  - Minimum bend radius: 1× material thickness for soft materials (aluminum, "
+        "copper), 2× for hard materials (steel, stainless)\n"
+        "  - Minimum flange length: 2× material thickness + bend radius\n"
+        "  - Hole-to-edge distance: minimum 2× material thickness from any hole edge\n"
+        "  - Hole-to-hole distance: minimum 3× material thickness between hole centers\n"
+        "  - K-factor for mild steel: 0.33 (inside setback = K × material_thickness × tan(bend_angle/2))\n"
+        "  - Standard gauges: 0.8mm (20 ga), 1.0mm (18 ga), 1.2mm (16 ga), 1.5mm (14 ga), 2.0mm (11 ga)\n"
+        "  - Bend relief: add 0.5mm × material_thickness slots at each corner of a bent flange\n"
+        "\n"
+        "GENERATION APPROACH:\n"
+        "  Sheet metal parts are generated as thin extruded profiles — NOT as thick solids.\n"
+        "  CadQuery does not natively support flat-pattern unfolding. Generate the folded "
+        "final shape only (not the flat pattern).\n"
+        "\n"
+        "(E1) FOR SIMPLE L-BRACKETS AND CHANNELS:\n"
+        "  Use stepwise extrusions:\n"
+        "  base = cq.Workplane('XY').rect(base_width, base_length).extrude(material_thickness)\n"
+        "  wall = base.faces('>Z').workplane().rect(wall_height, base_length).extrude(material_thickness)\n"
+        "  result = base.union(wall)\n"
+        "\n"
+        "(E2) FOR ENCLOSURE PANELS WITH FLANGES:\n"
+        "  Create the panel as a flat plate, then add flange extrusions on each edge.\n"
+        "  Panel: .box(width, height, thickness)\n"
+        "  Flange: select edge face, .workplane().rect(flange_depth, height).extrude(thickness)\n"
+        "\n"
+        "(E3) FOR CUTOUTS AND KNOCKOUTS:\n"
+        "  Use .faces().workplane().hole() or .cutBlind() for round/rectangular cutouts.\n"
+        "  For slots: .rect(slot_width, slot_height).cutThruAll()\n"
+        "\n"
+        "(E4) MATERIAL THICKNESS:\n"
+        "  Always use the cad_utils make_bent_bracket() or make_enclosure_panel() templates "
+        "when available — they enforce the design rules automatically.\n"
+        "  If generating from scratch: the material thickness must be UNIFORM across all faces.\n"
+        "\n"
+        "(E5) AVAILABLE SHEET METAL TEMPLATES (from cad_utils.py):\n"
+        "  from cad_utils import make_bent_bracket, make_enclosure_panel\n"
+        "  make_bent_bracket(material_thickness, base_length, base_width, flange_height, "
+        "bend_radius, n_base_holes, hole_diameter)\n"
+        "  make_enclosure_panel(width, height, material_thickness, flange_depth, "
+        "cutout_positions=[])\n"
     ),
 
     # ── Domain D: Aerospace / Aerodynamics ────────────────────────────
@@ -644,13 +717,18 @@ _DOMAIN_PREAMBLES = {
         "You are a CadQuery machinist specialized in AEROSPACE STRUCTURES. "
         "The part you are generating is classified as Domain D (Aerospace/Aerodynamics). "
     ),
+    "E": (
+        "You are a CadQuery machinist specialized in SHEET METAL PARTS. "
+        "The part you are generating is classified as Domain E (Sheet Metal/Thin-Wall). "
+    ),
 }
 
 # Rules always injected for a given domain (on top of core rules)
 _DOMAIN_RULES = {
-    "A": ["rule_domain_a"],
-    "B": ["rule_domain_b"],
+    "A": ["rule_feature_vocabulary", "rule_domain_a"],
+    "B": ["rule_feature_vocabulary", "rule_domain_b"],
     "C": ["rule_domain_c"],
+    "E": ["rule_feature_vocabulary", "rule_domain_e"],
     "D": [
         "rule_d_overview",
         "rule_no_shell",
@@ -691,6 +769,18 @@ _KEYWORD_TRIGGERS = {
     ],
     "rule_co2_dragster": [
         "dragster", "co2 car", "derby car", "race car",
+    ],
+    "rule_feature_vocabulary": [
+        "boss", "pocket", "bore", "counterbore", "countersink", "flange",
+        "web", "gusset", "rib", "keyway", "spline shaft", "gudgeon",
+        "thread boss", "shell", "lands",
+    ],
+    "rule_domain_e": [
+        "sheet metal", "sheet steel", "sheet aluminum", "bent plate",
+        "thin wall", "thin-wall", "enclosure panel", "pcb tray", "pcb mount",
+        "chassis panel", "metal gauge", "steel gauge", "aluminum gauge",
+        "bend radius", "flange height", "k-factor", "flat pattern",
+        "bend allowance", "metal bracket", "stamped",
     ],
 }
 
